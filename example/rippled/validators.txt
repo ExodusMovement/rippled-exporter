@@ -1,0 +1,31 @@
+[accounts]
+r3kmLJN5D28dHuH8vZNUZpMC43pEHpaocV
+
+[validation_public_key]
+nHB1FqfBpNg7UTpiqEUkKcAiWqC2PFuoGY7FPWtCcXAxSkhpqDkm
+nHUpwrafS45zmi6eT72XS5ijpkW5JwfL5mLdPhEibrqUvtRcMAjU
+nHUBGitjsiaiMJBWKYsJBHU2shmYt9m29hRqoh8AS5bSAjXoHmdd
+nHUXh1ELizQ5QLLqtNaVEbbbfMdq3wMkh14aJo5xi83xzzaatWWP
+nHUgoJvpqXZMZwxh8ZoFseFJEVF8ryup9r2mFYchX7ftMdNn3jLT
+
+[domain]
+ripple.com
+
+[ips]
+54.84.21.230 51235
+54.86.175.122 51235
+54.186.248.91 51235
+54.186.73.52 51235
+184.173.45.38 51235
+198.11.206.26 51235
+169.55.164.29 51235
+174.37.225.41 51235
+
+[validator_list_sites]
+http://vl.ripple.com
+
+[validator_list_keys]
+ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734
+
+[authinfo_url]
+https://id.ripple.com/v1/authinfo

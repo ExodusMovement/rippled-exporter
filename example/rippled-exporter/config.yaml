@@ -1,0 +1,7 @@
+port: 8000
+hostname: 0.0.0.0
+
+interval: 100 # in ms
+nodes:
+  - name: xrp1
+    url: http://rippled:5005/
