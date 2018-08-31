@@ -1,6 +1,6 @@
 {
   "name": "rippled-exporter",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Rippled exporter for Prometheus",
   "keywords": [],
   "bugs": {
