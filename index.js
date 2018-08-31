@@ -1,11 +1,9 @@
-const fs = require('fs').promises
-const path = require('path')
+#!/usr/bin/env node
 const fetch = require('node-fetch')
-const yaml = require('js-yaml')
 const polka = require('polka')
 const yargs = require('yargs')
 const winston = require('winston')
-const { Registry, Gauge, metrics: promMetrics } = require('prom-client2')
+const { Registry, Gauge } = require('prom-client')
 
 const logger = winston.createLogger({
   format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
@@ -15,19 +13,28 @@ const logger = winston.createLogger({
 function getArgs () {
   return yargs
     .usage('Usage: $0 [options]')
-    .option('config', {
-      coerce: (arg) => path.resolve(arg),
-      default: path.join(__dirname, 'config.yaml'),
+    .env('RIPPLED_EXPORTER')
+    .option('interval', {
+      default: 100,
+      describe: 'Metrics fetch interval',
+      type: 'number'
+    })
+    .option('listen', {
+      coerce (arg) {
+        const [hostname, port] = arg.split(':')
+        return { hostname, port }
+      },
+      default: 'localhost:8000',
+      describe: 'Provide metrics on host:port/metrics',
       type: 'string'
+    })
+    .option('node', {
+      default: 'http://localhost:5005/',
+      describe: 'Fetch info from this node'
     })
     .version()
     .help('help').alias('help', 'h')
     .argv
-}
-
-async function readConfig (config) {
-  const content = await fs.readFile(config, 'utf8')
-  return yaml.safeLoad(content)
 }
 
 async function makeRequest (url, method, params = {}) {
@@ -51,121 +58,85 @@ async function makeRequest (url, method, params = {}) {
   return json.result
 }
 
-function initParityMetrics (registry, nodes) {
+function initParityMetrics (registry, url) {
+  const createGauge = (name, help, labelNames) => new Gauge({ name, help, labelNames, registers: [registry] })
+
   const gauges = {
-    version: new Gauge({
-      name: 'rippled_version',
-      help: 'Client version',
-      labelNames: ['name', 'value'],
-      registers: [registry]
-    }),
-    peers: new Gauge({
-      name: 'rippled_peers',
-      help: 'Peer count',
-      labelNames: ['name', 'topic'],
-      registers: [registry]
-    }),
-    fee: new Gauge({
-      name: 'rippled_fee',
-      help: 'Base fee in drops (1e-6 XRP)',
-      labelNames: ['name'],
-      registers: [registry]
-    }),
-    ledgers: new Gauge({
-      name: 'rippled_complete_ledgers',
-      help: 'Info about complete ledgers',
-      labelNames: ['name', 'topic'],
-      registers: [registry]
-    })
+    version: createGauge('rippled_version', 'Client version', ['value']),
+    ledgers: createGauge('rippled_complete_ledgers', 'Info about complete ledgers', ['type']),
+    fee: createGauge('rippled_fee', 'Fee in drops (1e-6 XRP)', ['type']),
+    peers: createGauge('rippled_peers', 'Peer count', ['version'])
   }
 
-  const dataNodes = {}
-  for (const node of nodes) {
-    dataNodes[node.name] = {
-      version: '',
-      peers: { all: 0 },
-      fee: 0,
-      ledgers: [0, 0]
-    }
+  const data = {
+    version: '',
+    ledgers: [0, 0],
+    fee: 0,
+    peers: { all: 0 }
   }
 
-  const update = async ({ name, url }) => {
+  return async () => {
     const [
-      resServerInfo,
-      resPeers
+      { info },
+      { peers: srvpeers }
     ] = await Promise.all([
       makeRequest(url, 'server_info'),
       makeRequest(url, 'peers')
     ])
 
-    const data = dataNodes[name]
-
-    const version = resServerInfo.info.build_version
+    const version = info.build_version
     if (data.version !== version) {
-      gauges.version.labels({ name, value: version }).set(1)
+      gauges.version.set({ value: version }, 1)
       data.version = version
-      logger.info(`Update ${name}:version to ${version}`)
+      logger.info(`update version to ${version}`)
     }
 
-    const rpeers = resPeers.peers || []
+    const ledgers = info.complete_ledgers.split('-').map((x) => parseInt(x, 10))
+    const progress = parseFloat(((ledgers[1] - ledgers[0]) / ledgers[1]).toFixed(5))
+    if (!Number.isNaN(progress) && data.ledgers.join('-') !== ledgers.join('-')) {
+      gauges.ledgers.set({ type: 'from' }, ledgers[0])
+      gauges.ledgers.set({ type: 'to' }, ledgers[1])
+      gauges.ledgers.set({ type: 'total' }, ledgers[1] - ledgers[0])
+      gauges.ledgers.set({ type: 'progress' }, progress)
+      data.ledgers = ledgers
+      logger.info(`update ledgers to ${ledgers.join('-')}`)
+    }
+
+    if (info.validated_ledger) {
+      const fee = Math.ceil(info.validated_ledger.base_fee_xrp * 1e6)
+      if (data.fee !== fee) {
+        gauges.fee.set({ type: 'base' }, fee)
+        data.fee = fee
+        logger.info(`update fee to ${fee}`)
+      }
+    }
+
+    gauges.peers.reset()
+    const rpeers = srvpeers || []
     const peers = { all: rpeers.length }
     for (const item of rpeers) peers[item.version] = (peers[item.version] || 0) + 1
-    const isPeersChanged = Object.keys(peers).some((key) => data.peers[key] !== peers[key])
-    if (isPeersChanged) {
-      for (const [topic, value] of Object.entries(peers)) {
-        gauges.peers.labels({ name, topic }).set(value)
-      }
-
-      data.peers = peers
-      logger.info(`Update ${name}:peers to ${peers.all}`)
+    for (const [version, value] of Object.entries(peers)) {
+      gauges.peers.set({ version }, value)
     }
-
-    if (resServerInfo.info.validated_ledger) {
-      const fee = Math.ceil(resServerInfo.info.validated_ledger.base_fee_xrp * 1e6)
-      if (data.fee !== fee) {
-        gauges.fee.labels({ name }).set(fee)
-        data.fee = fee
-        logger.info(`Update ${name}:fee to ${fee}`)
-      }
-    }
-
-    const ledgers = resServerInfo.info.complete_ledgers.split('-').map((x) => parseInt(x, 10))
-    const progress = parseFloat(((ledgers[1] - ledgers[0]) * 100 / ledgers[1]).toFixed(6))
-    if (!Number.isNaN(progress) && data.ledgers.join('-') !== ledgers.join('-')) {
-      gauges.ledgers.labels({ name, topic: 'from' }).set(ledgers[0])
-      gauges.ledgers.labels({ name, topic: 'to' }).set(ledgers[1])
-      gauges.ledgers.labels({ name, topic: 'total' }).set(ledgers[1] - ledgers[0])
-      gauges.ledgers.labels({ name, topic: 'progress' }).set(progress)
-      data.ledgers = ledgers
-      logger.info(`Update ${name}:ledgers to ${ledgers.join('-')}`)
-    }
-  }
-
-  return async () => {
-    await Promise.all(nodes.map((node) => update(node)))
   }
 }
 
-function createPrometheusClient (config) {
+function createPrometheusClient (args) {
   const register = new Registry()
-  if (config.processMetrics) promMetrics.setup(register, 1000)
-
   return {
-    update: initParityMetrics(register, config.nodes),
+    update: initParityMetrics(register, args.node),
     onRequest (req, res) {
       res.setHeader('Content-Type', register.contentType)
-      res.end(register.exposeText())
+      res.end(register.metrics())
     }
   }
 }
 
 async function main () {
   const args = getArgs()
-  const config = await readConfig(args.config)
-
-  const client = createPrometheusClient(config)
-  await polka().get('/metrics', client.onRequest).listen(config.port, config.hostname)
-  logger.info(`listen at ${config.hostname}:${config.port}`)
+  const client = createPrometheusClient(args)
+  await polka().get('/metrics', client.onRequest).listen(args.listen.port, args.listen.hostname)
+  logger.info(`listen at ${args.listen.hostname}:${args.listen.port}`)
 
   process.on('SIGINT', () => process.exit(0))
   process.on('SIGTERM', () => process.exit(0))
@@ -173,7 +144,7 @@ async function main () {
   while (true) {
     const ts = Date.now()
     await client.update()
-    const delay = Math.max(10, config.interval - (Date.now() - ts))
+    const delay = Math.max(10, args.interval - (Date.now() - ts))
     await new Promise((resolve) => setTimeout(resolve, delay))
   }
 }
